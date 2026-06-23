@@ -23,5 +23,44 @@ services:
       # Persists the SQLite database and generated identity key ($TUNNELS_DATA=/data).
       - tunnels-data:/data
 
+  # ---------------------------------------------------------------------------
+  # Alternative dev-mode service: no Dockerfile build. Runs straight from a
+  # mounted marmot-ts monorepo checkout (tunnels lives at examples/tunnels)
+  # using a plain node:24-slim image, installing + building on container start.
+  # To use it: comment out the `tunnels` service above, uncomment this one and
+  # the `networks` block at the bottom, and adjust the host path / network.
+  # ---------------------------------------------------------------------------
+  # tunnels:
+  #   image: node:24-slim
+  #   working_dir: /app
+  #   restart: unless-stopped
+  #   container_name: marmot-tunnels
+  #   volumes:
+  #     - /root/marmot-ts:/app
+  #   environment:
+  #     PORT: "3000"
+  #     TUNNELS_DATA: /app/examples/tunnels/data
+  #     TUNNELS_SECRET: "${TUNNELS_SECRET:-}"
+  #     TUNNELS_RELAYS: "${TUNNELS_RELAYS:-}"
+  #     TUNNELS_OUTBOX_RELAYS: "${TUNNELS_OUTBOX_RELAYS:-}"
+  #     TUNNELS_INBOX_RELAYS: "${TUNNELS_INBOX_RELAYS:-}"
+  #     DEBUG: "${DEBUG:-tunnels:*}"
+  #     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  #   # ports:
+  #     # - "${PORT:-3000}:3000"
+  #   command: >
+  #     sh -c "corepack enable &&
+  #            pnpm install &&
+  #            pnpm build &&
+  #            pnpm --filter tunnels build &&
+  #            pnpm --filter tunnels start"
+  #   networks:
+  #     - public
+
 volumes:
   tunnels-data:
+
+# Uncomment alongside the dev-mode service above.
+# networks:
+#   public:
+#     external: true
