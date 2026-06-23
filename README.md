@@ -31,7 +31,11 @@ renders each group's full history as a branching timeline.
      and linking to its own epoch page — plus a per-fork breakdown of which
      members have sent messages on each branch and the furthest epoch each
      reached (so you can see where members sit across forks and how far down a
-     branch they have progressed).
+     branch they have progressed). A **pending events** section at the bottom
+     lists kind-445 events received but not yet decrypted into the tree (the
+     engine's ingestion pool). It is normally empty; anything lingering there is
+     an event this observer could never read — a gap that points at a
+     decode/convergence bug rather than going unnoticed.
    - `/<group-id>/timeline` is the **conversations timeline**: every fork
      rendered as a vertical root→tip column, side by side, so you can read what
      a member on each branch sees. Stops (epochs) are aligned by depth across

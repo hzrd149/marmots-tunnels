@@ -121,6 +121,7 @@ app.get("/:groupId", async (c) => {
       view={view}
       countByTag={stats.countByTag}
       forks={summarizeForks(view, stats)}
+      pending={group.pendingEvents()}
       nameFor={(pubkey) => server.nameFor(pubkey)}
     />,
   );

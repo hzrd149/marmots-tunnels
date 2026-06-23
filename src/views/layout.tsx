@@ -67,6 +67,7 @@ const STYLES = `
   .pill.tip { color: var(--tip); border-color: var(--tip); }
   .pill.fork { color: var(--fork); border-color: var(--fork); }
   .pill.canon { color: var(--accent); border-color: var(--accent); }
+  .pill.danger { color: var(--danger); border-color: var(--danger); }
   .empty { color: var(--muted); padding: 24px; text-align: center; }
   .graph-wrap { overflow-x: auto; padding: 8px 0; }
   .msg { padding: 10px 0; border-bottom: 1px solid var(--border); }

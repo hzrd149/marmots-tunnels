@@ -1,11 +1,14 @@
 import type { FC } from "hono/jsx";
 
+import type { NostrEvent } from "applesauce-core/helpers/event";
+
 import type {
   MarmotGroup,
   ForkTreeView,
 } from "@internet-privacy/marmot-ts/client";
 
 import type { ForkSummary } from "../helpers/fork-stats.js";
+import { formatTime, hexShort, npubShort } from "../helpers/format.js";
 import { groupName } from "../marmot/server.js";
 import { Author } from "./author.js";
 import { ForkGraph } from "./fork-graph.js";
@@ -20,6 +23,12 @@ export interface GroupOverviewProps {
   countByTag: Map<string, number>;
   /** Per-fork participant progress. */
   forks: ForkSummary[];
+  /**
+   * Raw kind-445 events received but not yet decrypted into the fork tree (the
+   * engine's ingestion pool). Healthy state is empty; lingering entries are
+   * undecryptable events and point at a bug.
+   */
+  pending: NostrEvent[];
   nameFor: (pubkey: string) => string;
 }
 
@@ -36,6 +45,7 @@ export const GroupOverview: FC<GroupOverviewProps> = ({
   view,
   countByTag,
   forks,
+  pending,
   nameFor,
 }) => {
   const info = group.info;
@@ -151,6 +161,53 @@ export const GroupOverview: FC<GroupOverviewProps> = ({
               )}
             </div>
           ))
+        )}
+      </section>
+
+      <section class="panel">
+        <h2>
+          Pending events
+          {pending.length > 0 ? (
+            <span class="pill danger">{pending.length} undecrypted</span>
+          ) : (
+            <span class="pill tip">none</span>
+          )}
+        </h2>
+        <p class="hint">
+          Kind-445 group events received from relays (and the durable archive)
+          that have <strong>not</strong> yet decrypted/processed into the fork
+          tree above — the engine's ingestion pool. They are retried as the tree
+          grows, so this is normally empty. Anything that lingers here is an
+          event this observer could never read: a missing event would otherwise
+          go unnoticed, and a stuck one points at a decode/convergence bug.
+        </p>
+        {pending.length === 0 ? (
+          <div class="empty">
+            Every received event decrypted into the tree — no gaps.
+          </div>
+        ) : (
+          <table class="heads pending">
+            <thead>
+              <tr>
+                <th>event id</th>
+                <th>received</th>
+                <th>ephemeral sender</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pending.map((event) => (
+                <tr>
+                  <td class="mono" title={event.id}>
+                    {hexShort(event.id)}
+                  </td>
+                  <td>{formatTime(event.created_at)}</td>
+                  <td class="mono" title={event.pubkey}>
+                    {npubShort(event.pubkey)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </section>
     </Layout>
