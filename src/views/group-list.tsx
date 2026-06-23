@@ -43,11 +43,12 @@ function relativeTime(seconds: number): string {
 /** The index page: every group the server is currently following. */
 export const GroupList: FC<{
   npub: string;
+  viewer?: string;
   outboxRelays: string[];
   inboxRelays: string[];
   groups: GroupSummary[];
-}> = ({ npub, outboxRelays, inboxRelays, groups }) => (
-  <Layout title="tunnels — groups" npub={npub}>
+}> = ({ npub, viewer, outboxRelays, inboxRelays, groups }) => (
+  <Layout title="tunnels — groups" npub={npub} viewer={viewer}>
     <section class="panel">
       <h2>Observer</h2>
       <div class="meta">

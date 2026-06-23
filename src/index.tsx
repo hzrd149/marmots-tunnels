@@ -1,8 +1,10 @@
 import { serve } from "@hono/node-server";
+import { npubEncode } from "applesauce-core/helpers/pointers";
 import { Hono } from "hono";
 
 import type { GroupRumorHistory } from "@internet-privacy/marmot-ts/client";
 
+import { Auth } from "./auth.js";
 import { computeNodeStats, summarizeForks } from "./helpers/fork-stats.js";
 import { buildTimeline } from "./helpers/timeline.js";
 import { configFromEnv, createServer } from "./marmot/setup.js";
@@ -10,6 +12,7 @@ import { EpochPage } from "./views/epoch.js";
 import { GroupList, summarize } from "./views/group-list.js";
 import { GroupOverview } from "./views/group-overview.js";
 import { Layout } from "./views/layout.js";
+import { LoginPage } from "./views/login.js";
 import { TimelinePage } from "./views/timeline.js";
 
 const config = configFromEnv();
@@ -17,6 +20,40 @@ const server = await createServer(config);
 await server.start();
 
 const app = new Hono();
+
+// Optional access gate. Active only when a NOSTR_WHITELIST is configured;
+// otherwise every route is public (unchanged). The middleware must be registered
+// before the page routes so it runs for all of them.
+const auth = new Auth({
+  enabled: config.whitelist.length > 0,
+  audience: server.npub,
+  whitelist: new Set(config.whitelist),
+  sessionSeconds: config.sessionHours * 3600,
+});
+app.use("*", auth.requireAuth());
+
+/** Only follow same-origin paths back after login (no open redirects). */
+function safeNext(value: string | undefined): string {
+  return value && value.startsWith("/") && !value.startsWith("//")
+    ? value
+    : "/";
+}
+
+/** The signed-in viewer as an npub (for the top-bar), or undefined when public. */
+function viewerNpub(c: { get: (k: "viewer") => string | undefined }) {
+  const viewer = c.get("viewer");
+  return viewer ? npubEncode(viewer) : undefined;
+}
+
+app.get("/login", (c) => {
+  if (!auth.enabled) return c.redirect("/");
+  if (auth.viewer(c)) return c.redirect(safeNext(c.req.query("next")));
+  return c.html(
+    <LoginPage npub={server.npub} sessionSeconds={config.sessionHours * 3600} />,
+  );
+});
+app.post("/login", (c) => auth.login(c));
+app.get("/logout", (c) => auth.logout(c));
 
 app.get("/", (c) => {
   const groups = server
@@ -27,6 +64,7 @@ app.get("/", (c) => {
   return c.html(
     <GroupList
       npub={server.npub}
+      viewer={viewerNpub(c)}
       outboxRelays={server.outboxRelays}
       inboxRelays={server.inboxRelays}
       groups={groups}
@@ -78,6 +116,7 @@ app.get("/:groupId", async (c) => {
   return c.html(
     <GroupOverview
       npub={server.npub}
+      viewer={viewerNpub(c)}
       group={group}
       view={view}
       countByTag={stats.countByTag}
@@ -105,6 +144,7 @@ app.get("/:groupId/timeline", async (c) => {
   return c.html(
     <TimelinePage
       npub={server.npub}
+      viewer={viewerNpub(c)}
       group={group}
       timeline={timeline}
       committerByTag={committerByTag}
@@ -129,6 +169,7 @@ app.get("/:groupId/:tag", async (c) => {
   return c.html(
     <EpochPage
       npub={server.npub}
+      viewer={viewerNpub(c)}
       group={group}
       tag={tag}
       detail={detail}
@@ -143,6 +184,11 @@ const httpServer = serve({ fetch: app.fetch, port: config.port }, (info) => {
   console.log(`identity: ${server.npub}`);
   console.log(`outbox:   ${config.outboxRelays.join(", ")}`);
   console.log(`inbox:    ${config.inboxRelays.join(", ")}`);
+  console.log(
+    auth.enabled
+      ? `access:   gated — ${config.whitelist.length} whitelisted npub(s), ${config.sessionHours}h sessions`
+      : `access:   public (set NOSTR_WHITELIST to gate)`,
+  );
 });
 
 function shutdown() {

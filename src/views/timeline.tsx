@@ -16,6 +16,7 @@ const KIND_LABELS: Record<number, string> = {
 
 export interface TimelinePageProps {
   npub: string;
+  viewer?: string;
   group: MarmotGroup;
   timeline: Timeline;
   /** Committer pubkey keyed by node tag (for labelling each commit). */
@@ -36,6 +37,7 @@ const COLS = (n: number) => `grid-template-columns: repeat(${n}, 320px);`;
  */
 export const TimelinePage: FC<TimelinePageProps> = ({
   npub,
+  viewer,
   group,
   timeline,
   committerByTag,
@@ -44,7 +46,12 @@ export const TimelinePage: FC<TimelinePageProps> = ({
   const { forks } = timeline;
 
   return (
-    <Layout title={`tunnels — ${groupName(group)} timeline`} npub={npub} wide>
+    <Layout
+      title={`tunnels — ${groupName(group)} timeline`}
+      npub={npub}
+      viewer={viewer}
+      wide
+    >
       <p>
         <a href="/">← all groups</a>
         {" · "}

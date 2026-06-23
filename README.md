@@ -75,6 +75,8 @@ on Node 24, where no flag is needed.
 | `TUNNELS_RELAYS`          | built-in defaults                    | Shared fallback for both inbox and outbox when the specific var is unset. |
 | `TUNNELS_DATA`            | `./data`                             | Directory for the SQLite database and the generated identity key.         |
 | `TUNNELS_GROUP_TTL_HOURS` | unset (retain forever)               | When > 0, purge groups idle (no kind-445 activity) for this many hours.   |
+| `NOSTR_WHITELIST`         | unset (public)                       | Comma-separated npubs allowed to view the app. When set, gates the UI.    |
+| `NOSTR_SESSION_HOURS`     | `24`                                 | Login session length (only when `NOSTR_WHITELIST` is set).                |
 | `PORT`                    | `3000`                               | HTTP port for the web UI.                                                 |
 
 Relay lists are comma-separated, e.g.
@@ -82,6 +84,16 @@ Relay lists are comma-separated, e.g.
 
 To follow a group, invite the npub printed on startup (`identity: npub1…`) to a
 Marmot group from any Marmot client; the group appears at `/` within moments.
+
+### Access control
+
+By default the web UI is public. Set `NOSTR_WHITELIST` to a comma-separated list
+of npubs to gate it behind a Nostr login: visitors must sign a **Nostr Web Token**
+([NIP-WT](https://github.com/nostr-protocol/nips/blob/master/WT.md), kind 27519)
+with a whitelisted key, using a NIP-07 browser extension or NIP-46 remote signer
+(bridged by [window.nostr.js](https://github.com/fiatjaf/window.nostr.js/)). The
+verified token is stored in an HttpOnly session cookie; sessions last
+`NOSTR_SESSION_HOURS` (default 24). Sign out at `/logout`.
 
 ## Storage
 

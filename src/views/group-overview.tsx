@@ -13,6 +13,7 @@ import { Layout } from "./layout.js";
 
 export interface GroupOverviewProps {
   npub: string;
+  viewer?: string;
   group: MarmotGroup;
   view: ForkTreeView;
   /** Application-message count keyed by node tag (for the graph annotations). */
@@ -30,6 +31,7 @@ export interface GroupOverviewProps {
  */
 export const GroupOverview: FC<GroupOverviewProps> = ({
   npub,
+  viewer,
   group,
   view,
   countByTag,
@@ -39,7 +41,12 @@ export const GroupOverview: FC<GroupOverviewProps> = ({
   const info = group.info;
 
   return (
-    <Layout title={`tunnels — ${groupName(group)}`} npub={npub} wide>
+    <Layout
+      title={`tunnels — ${groupName(group)}`}
+      npub={npub}
+      viewer={viewer}
+      wide
+    >
       <p>
         <a href="/">← all groups</a>
         {" · "}

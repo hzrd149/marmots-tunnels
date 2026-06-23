@@ -18,6 +18,7 @@ const KIND_LABELS: Record<number, string> = {
 
 export interface EpochPageProps {
   npub: string;
+  viewer?: string;
   group: MarmotGroup;
   /** The node tag this page is for. */
   tag: string;
@@ -34,6 +35,7 @@ export interface EpochPageProps {
  */
 export const EpochPage: FC<EpochPageProps> = ({
   npub,
+  viewer,
   group,
   tag,
   detail,
@@ -43,7 +45,12 @@ export const EpochPage: FC<EpochPageProps> = ({
   const node = detail.node;
 
   return (
-    <Layout title={`tunnels — epoch ${node?.epoch ?? "?"}`} npub={npub} wide>
+    <Layout
+      title={`tunnels — epoch ${node?.epoch ?? "?"}`}
+      npub={npub}
+      viewer={viewer}
+      wide
+    >
       <p>
         <a href="/">← all groups</a>
         {" · "}

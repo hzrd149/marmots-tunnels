@@ -32,6 +32,15 @@ const STYLES = `
   }
   header.top h1 { font-size: 16px; margin: 0; }
   header.top .id { color: var(--muted); font-size: 12px; }
+  header.top .session { margin-left: auto; display: flex; align-items: center;
+    gap: 12px; font-size: 12px; color: var(--muted); }
+  .btn {
+    display: inline-block; cursor: pointer; font: inherit; font-weight: 600;
+    color: #fff; background: var(--accent-dim); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 9px 16px;
+  }
+  .btn:hover { background: var(--accent); }
+  .btn:disabled { opacity: .6; cursor: default; }
   main { max-width: 1100px; margin: 0 auto; padding: 24px; }
   main.wide { max-width: none; }
   .panel {
@@ -163,9 +172,18 @@ const STYLES = `
     margin-top: 3px; }
 `;
 
-/** The shared HTML shell: dark theme, top bar with the server identity. */
+/**
+ * The shared HTML shell: dark theme, top bar with the server identity. When a
+ * `viewer` npub is passed (auth gate active) the top bar shows it plus a logout
+ * link; call sites that don't pass one render unchanged.
+ */
 export const Layout: FC<
-  PropsWithChildren<{ title: string; npub: string; wide?: boolean }>
+  PropsWithChildren<{
+    title: string;
+    npub: string;
+    wide?: boolean;
+    viewer?: string;
+  }>
 > = (props) => (
   <html lang="en">
     <head>
@@ -180,6 +198,14 @@ export const Layout: FC<
           <a href="/">tunnels</a>
         </h1>
         <span class="id mono">{props.npub}</span>
+        {props.viewer ? (
+          <span class="session">
+            <span class="mono" title={props.viewer}>
+              {props.viewer.slice(0, 12)}…
+            </span>
+            <a href="/logout">log out</a>
+          </span>
+        ) : null}
       </header>
       <main class={props.wide ? "wide" : undefined}>{props.children}</main>
     </body>

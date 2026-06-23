@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import { EventStore } from "applesauce-core/event-store";
 import { normalizeRelayUrl } from "applesauce-core/helpers";
+import {
+  decodePointer,
+  getPubkeyFromDecodeResult,
+} from "applesauce-core/helpers/pointers";
 import { relaySet } from "applesauce-core/helpers/relays";
 import { createEventLoaderForStore } from "applesauce-loaders/loaders";
 import { RelayPool as AsRelayPool } from "applesauce-relay/pool";
@@ -57,6 +61,14 @@ export interface TunnelConfig {
    * storage. Unset/0 means retain every group forever (the default).
    */
   groupTtlHours?: number;
+  /**
+   * Allowed viewer pubkeys (hex), parsed from `NOSTR_WHITELIST`. When non-empty,
+   * the web UI is gated behind a Nostr Web Token login restricted to these keys.
+   * Empty means the gate is disabled and the site is fully public (the default).
+   */
+  whitelist: string[];
+  /** Login session length in hours (`NOSTR_SESSION_HOURS`, default 24). */
+  sessionHours: number;
 }
 
 /**
@@ -74,7 +86,41 @@ export function configFromEnv(env = process.env): TunnelConfig {
     port: Number(env.PORT) || 3000,
     secretOverride: env.TUNNELS_SECRET?.trim() || undefined,
     groupTtlHours: parseTtlHours(env.TUNNELS_GROUP_TTL_HOURS),
+    whitelist: parseWhitelist(env.NOSTR_WHITELIST),
+    sessionHours: parseSessionHours(env.NOSTR_SESSION_HOURS),
   };
+}
+
+/**
+ * Parse the comma-separated `NOSTR_WHITELIST` into deduped hex pubkeys. Accepts
+ * `npub`/`nprofile` (and raw 64-char hex), skipping anything unparseable with a
+ * warning so one bad entry doesn't lock everyone out.
+ */
+function parseWhitelist(value: string | undefined): string[] {
+  if (!value?.trim()) return [];
+  const hex = new Set<string>();
+  for (const raw of value.split(",")) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    if (/^[0-9a-f]{64}$/i.test(entry)) {
+      hex.add(entry.toLowerCase());
+      continue;
+    }
+    try {
+      const pubkey = getPubkeyFromDecodeResult(decodePointer(entry));
+      if (pubkey) hex.add(pubkey);
+      else console.warn(`NOSTR_WHITELIST: ignoring entry without a pubkey: ${entry}`);
+    } catch {
+      console.warn(`NOSTR_WHITELIST: ignoring unparseable entry: ${entry}`);
+    }
+  }
+  return [...hex];
+}
+
+/** Parse `NOSTR_SESSION_HOURS` (> 0), defaulting to 24. */
+function parseSessionHours(value: string | undefined): number {
+  const hours = Number(value?.trim());
+  return Number.isFinite(hours) && hours > 0 ? hours : 24;
 }
 
 /** Parse a positive number of hours, or `undefined` for retain-forever. */
