@@ -1,0 +1,13 @@
+packages:
+  - .
+  - marmot-ts
+  - marmot-ts/ts-mls
+
+# esbuild ships a native binary via a postinstall build script (tsx depends on
+# it). Allow it to run, and don't fail the whole install if pnpm still decides
+# to skip it — the platform binary package (@esbuild/linux-x64) provides it.
+allowBuilds:
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild
+strictDepBuilds: false
