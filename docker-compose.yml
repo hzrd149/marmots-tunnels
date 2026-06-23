@@ -1,0 +1,27 @@
+# Example Compose file for running the tunnels server.
+#
+#   1. cp .env.example .env   # then edit as needed (all vars are optional)
+#   2. docker compose up -d
+#
+# The web UI is then available at http://localhost:3000
+
+services:
+  tunnels:
+    # Build the image from this repo...
+    build: .
+    # ...or use the published image instead (comment out `build` above):
+    # image: ghcr.io/hzrd149/marmot-tunnels:latest
+    container_name: tunnels
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      # Loaded if present; copy .env.example to .env to set config.
+      - path: .env
+        required: false
+    volumes:
+      # Persists the SQLite database and generated identity key ($TUNNELS_DATA=/data).
+      - tunnels-data:/data
+
+volumes:
+  tunnels-data:
