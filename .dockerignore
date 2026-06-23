@@ -1,0 +1,19 @@
+# Rebuilt inside the image — never copy host artifacts in.
+**/node_modules
+**/dist
+
+# git metadata (submodule .git files included)
+.git
+**/.git
+
+# runtime state
+data/
+*.db
+*.db-wal
+*.db-shm
+identity.key
+
+# env + logs
+.env
+.env.production
+*.log
