@@ -85,6 +85,17 @@ Three layers, wired top-down from `src/index.tsx`:
   message: it never advances the epoch, so the contract holds. Reactions are deduped
   ("react once ever") via the `reactions` table so a restart's archive replay stays
   quiet.
+  - **Fork-targeted encryption** (`helpers/fork-send.ts`, `#sendReactionAt`): the
+    reaction is encrypted against the *exact epoch the message decrypted at*
+    (`forkTree.stateAt(tag)`) via the public `createApplicationMessage` +
+    `createGroupEvent`, **not** the server's canonical state — so a client on a fork
+    the server isn't following can still decrypt it. Encrypting consumes a
+    sender-ratchet generation, so the server keeps its *own* advancing copy of each
+    epoch's state (`#forkSendState`, persisted to the `forksend` table) instead of
+    the engine's snapshot, advances+persists it before publishing (gap-over-reuse),
+    and serializes sends per epoch (`#withEpochLock`) so two reactions never reuse a
+    generation (which clients would reject as a replay). Our own published events are
+    skipped on ingest (`#sentEventIds`) so they don't re-enter the pool.
 - **Relay-independence via the event archive.** Every raw kind-445 event is archived
   to the `events` table (keyed `${groupHex}:${eventId}`). On startup the server
   **replays the archive into the engine before backfilling from relays**, so full
@@ -98,7 +109,8 @@ JSON replacer/reviver tag-and-restore `Uint8Array` (base64) and `bigint`, since 
 state doesn't round-trip through plain JSON. Tables: `groups`, `rewind`,
 `keypackages`, `invites` (library-owned), and `messages`, `message_epochs`, `events`,
 `reactions`, `received` (first-seen event receive times), `joined` (per-group join
-times) (tunnels-owned sidecars). `PrefixedKeyValueStore` namespaces per-group
+times), `forksend` (our advancing per-epoch sender state for fork-targeted
+reactions) (tunnels-owned sidecars). `PrefixedKeyValueStore` namespaces per-group
 data inside a shared table by a `${groupHex}:` prefix. The identity key persists at
 `$TUNNELS_DATA/identity.key` (unless `TUNNELS_SECRET` overrides it), so restarts keep
 the same group memberships.

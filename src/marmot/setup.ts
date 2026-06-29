@@ -273,6 +273,13 @@ export async function createServer(
     // Recorded at join; lets the UI mark events created before we were added
     // (which this observer can never decrypt).
     joinedStore: new SqliteKeyValueStore<number>(db, "joined"),
+    // Our advancing per-epoch sender state, keyed `${groupHex}:${tag}` with a
+    // serialized ClientState. Reactions are encrypted against the exact fork
+    // epoch the message decrypted at (so clients on that fork can read them);
+    // each send advances that epoch's sender ratchet, and this store persists the
+    // advance so a restart doesn't reuse a generation (which clients would
+    // reject). See `helpers/fork-send.ts`.
+    forkSendStore: new SqliteKeyValueStore<Uint8Array>(db, "forksend"),
     groupTtlHours: config.groupTtlHours,
     dispose: () => db.close(),
   });

@@ -18,7 +18,11 @@ import {
   GROUP_EVENT_KIND,
 } from "@internet-privacy/marmot-ts";
 import type { GenericKeyValueStore } from "@internet-privacy/marmot-ts/utils";
-import { getCredentialPubkey } from "@internet-privacy/marmot-ts/core";
+import {
+  deserializeClientState,
+  getCredentialPubkey,
+  serializeClientState,
+} from "@internet-privacy/marmot-ts/core";
 import {
   contentTypes,
   defaultProposalTypes,
@@ -35,6 +39,7 @@ import type {
 import createDebug from "debug";
 
 import type { Directory } from "../helpers/discovery.js";
+import { encryptApplicationMessageAt } from "../helpers/fork-send.js";
 import type { RelayPool } from "../helpers/relay-pool.js";
 import {
   branchTagFor,
@@ -122,6 +127,12 @@ export interface TunnelServerOptions {
   /** Join time (unix seconds) per group, keyed by group hex. */
   joinedStore: GenericKeyValueStore<number>;
   /**
+   * Our advancing per-epoch sender state (serialized {@link ClientState}), keyed
+   * `${groupHex}:${tag}`. Persists the sender-ratchet generation across restarts
+   * so fork-targeted reactions never reuse a generation.
+   */
+  forkSendStore: GenericKeyValueStore<Uint8Array>;
+  /**
    * Optional inactivity TTL in hours. When set (> 0), groups idle for at least
    * this long are periodically purged from local storage. Unset = retain forever.
    */
@@ -149,7 +160,10 @@ const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
  * epoch — so the fork-tree contract still holds. The reaction both confirms the
  * debugger received the message and makes a client-side fork *visible*: once a
  * client diverges, the server sees its later messages on a new branch, so their
- * emoji changes while the pre-fork messages keep the old one.
+ * emoji changes while the pre-fork messages keep the old one. Each reaction is
+ * encrypted against the exact epoch the message decrypted at — not the server's
+ * canonical state — so a client on a fork the server is not following can still
+ * decrypt the reaction (see {@link #sendReactionAt}).
  *
  * The lifecycle: publish a discoverable identity + KeyPackage so peers can
  * invite us, restore + connect every known group, auto-accept every joinable
@@ -170,6 +184,7 @@ export class TunnelServer {
   readonly #reactedStore: GenericKeyValueStore<string>;
   readonly #receivedStore: GenericKeyValueStore<number>;
   readonly #joinedStore: GenericKeyValueStore<number>;
+  readonly #forkSendStore: GenericKeyValueStore<Uint8Array>;
   readonly #groupTtlHours?: number;
   readonly #dispose?: () => void;
 
@@ -190,6 +205,12 @@ export class TunnelServer {
   readonly #receivedCache = new Map<string, number>();
   /** Join time (unix s) per group hex, cached lazily from `#joinedStore`. */
   readonly #joinedCache = new Map<string, number>();
+  /** Live advancing sender state per `${groupHex}:${tag}` for fork-targeted sends. */
+  readonly #forkSendState = new Map<string, ClientState>();
+  /** Per-epoch send serializer (promise chain) keyed `${groupHex}:${tag}`. */
+  readonly #forkSendChain = new Map<string, Promise<unknown>>();
+  /** Ids of kind-445 events we published, to skip ingesting our own echoes. */
+  readonly #sentEventIds = new Set<string>();
 
   #stopped = false;
   #inviteConnection?: Unsubscribable;
@@ -212,6 +233,7 @@ export class TunnelServer {
     this.#reactedStore = options.reactedStore;
     this.#receivedStore = options.receivedStore;
     this.#joinedStore = options.joinedStore;
+    this.#forkSendStore = options.forkSendStore;
     this.#groupTtlHours = options.groupTtlHours;
     this.#dispose = options.dispose;
   }
@@ -459,8 +481,9 @@ export class TunnelServer {
    * *without publishing anything* — so the passive-observer contract holds — and
    * its `destroyed` event drives `#untrack` via the watch loop. We then clear the
    * tunnels-owned sidecars the library doesn't know about: the raw-event archive,
-   * the message-meta index, the reacted-message dedup index, and the receive-time
-   * index (all keyed `${groupHex}:`), plus this group's join-time row.
+   * the message-meta index, the reacted-message dedup index, the receive-time
+   * index, and the per-epoch sender-state index (all keyed `${groupHex}:`), plus
+   * this group's join-time row.
    */
   async #purgeGroup(idStr: string): Promise<void> {
     try {
@@ -474,9 +497,15 @@ export class TunnelServer {
     await this.#clearPrefixed(this.#metaStore, `${idStr}:`);
     await this.#clearPrefixed(this.#reactedStore, `${idStr}:`);
     await this.#clearPrefixed(this.#receivedStore, `${idStr}:`);
+    await this.#clearPrefixed(this.#forkSendStore, `${idStr}:`);
     await this.#joinedStore.removeItem(idStr).catch(() => {});
     this.#joinedCache.delete(idStr);
-    for (const cache of [this.#metaCache, this.#receivedCache]) {
+    for (const cache of [
+      this.#metaCache,
+      this.#receivedCache,
+      this.#forkSendState,
+      this.#forkSendChain,
+    ]) {
       for (const key of [...cache.keys()]) {
         if (key.startsWith(`${idStr}:`)) cache.delete(key);
       }
@@ -520,7 +549,13 @@ export class TunnelServer {
     const seen = new Set<string>();
     const history = group.history as unknown as GroupRumorHistory | undefined;
     const drain = async (events: NostrEvent[]): Promise<void> => {
-      const fresh = events.filter((event) => !seen.has(event.id));
+      // Skip the echoes of reactions we published ourselves: they carry no new
+      // information and would otherwise re-enter ingest (and possibly the pending
+      // pool). Persisted dedup isn't needed — on restart they replay once, the
+      // same as any other archived event.
+      const fresh = events.filter(
+        (event) => !seen.has(event.id) && !this.#sentEventIds.has(event.id),
+      );
       for (const event of fresh) seen.add(event.id);
       if (!fresh.length) return;
       // Archive every event before processing it, so the durable store is a
@@ -707,9 +742,13 @@ export class TunnelServer {
    * Only kind-9 chat rumors are reacted to (never our own reactions, never
    * non-chat rumors — which also avoids any react-to-our-own-reaction loop). The
    * dedup key is claimed synchronously so concurrent drains don't double-react,
-   * and persisted on success so a restart's archive replay stays quiet. Sending
-   * is a pure MLS application message: it never commits or advances the epoch, so
-   * the fork-tree the debugger watches is undisturbed.
+   * and persisted on success so a restart's archive replay stays quiet.
+   *
+   * Crucially the reaction is encrypted against the *exact epoch* the message
+   * decrypted at ({@link #sendReactionAt}), not the server's canonical state — so
+   * clients sitting on a fork the server is not following can still decrypt it. It
+   * remains a pure MLS application message: it never commits or advances the
+   * epoch, so the fork-tree the debugger watches is undisturbed.
    */
   async #maybeReact(
     group: MarmotGroup,
@@ -743,19 +782,105 @@ export class TunnelServer {
         target,
         emoji,
       });
-      await group.submitIntent(createApplicationMessageIntent(reaction));
+      await this.#sendReactionAt(group, reaction, tag);
       await this.#reactedStore.setItem(key, emoji).catch(() => {});
       log(
-        "reacted %s to %s on %s (branch %s)",
+        "reacted %s to %s on %s (epoch %s, branch %s)",
         emoji,
         target.id.slice(0, 8),
         group.idStr.slice(0, 8),
+        tag.slice(0, 8),
         branch ? branch.slice(0, 8) : "—",
       );
     } catch (err) {
       this.#reactedCache.delete(key); // let a later sighting retry
       log("react failed for %s: %O", target.id.slice(0, 8), err);
     }
+  }
+
+  /**
+   * Publish `reaction` as an MLS application message encrypted against the epoch
+   * identified by fork-node `tag` — the epoch the message it reacts to decrypted
+   * at — so any client currently on that fork can read it, even when the server's
+   * own canonical branch has diverged elsewhere.
+   *
+   * Encrypting consumes a sender-ratchet generation, so we keep our own advancing
+   * copy of that epoch's state (in {@link #forkSendState}, persisted to
+   * {@link #forkSendStore}) rather than the engine's snapshot, and never reuse a
+   * generation. All sends for one epoch are serialized through
+   * {@link #withEpochLock} so two concurrent reactions can't both encrypt from the
+   * same generation. The state is advanced and persisted *before* publishing: a
+   * failed publish then leaves a harmless generation gap (receivers tolerate it),
+   * whereas the reverse could reuse a generation after a crash.
+   */
+  async #sendReactionAt(
+    group: MarmotGroup,
+    reaction: Rumor,
+    tag: string,
+  ): Promise<void> {
+    const key = `${group.idStr}:${tag}`;
+    const payload = createApplicationMessageIntent(reaction).payload;
+    const relays = group.relays?.length ? group.relays : this.#relays;
+
+    await this.#withEpochLock(key, async () => {
+      const state = await this.#epochSendState(group, key, tag);
+      if (!state) throw new Error(`no sender state retained for epoch ${tag}`);
+
+      const { event, newState } = await encryptApplicationMessageAt({
+        ciphersuite: group.ciphersuite,
+        state,
+        payload,
+      });
+
+      // Advance + persist the generation before publishing (gap-over-reuse), and
+      // record the event id so we skip ingesting our own echo.
+      this.#forkSendState.set(key, newState);
+      await this.#forkSendStore
+        .setItem(key, serializeClientState(newState))
+        .catch(() => {});
+      this.#sentEventIds.add(event.id);
+      await this.#pool.publish(relays, event);
+    });
+  }
+
+  /**
+   * The current advancing sender state for one epoch: the live in-memory copy if
+   * we've already sent at it this run, else the persisted advanced state from an
+   * earlier run, else a fresh snapshot of the epoch from the fork tree (the first
+   * send starts from the engine's pristine post-commit state). `undefined` if the
+   * epoch retains no snapshot (e.g. we were never a member at it).
+   */
+  async #epochSendState(
+    group: MarmotGroup,
+    key: string,
+    tag: string,
+  ): Promise<ClientState | undefined> {
+    const live = this.#forkSendState.get(key);
+    if (live) return live;
+    const stored = await this.#forkSendStore.getItem(key);
+    if (stored != null) {
+      const restored = deserializeClientState(stored);
+      this.#forkSendState.set(key, restored);
+      return restored;
+    }
+    const fresh = await group.forkTree.stateAt(tag);
+    if (fresh) this.#forkSendState.set(key, fresh);
+    return fresh;
+  }
+
+  /** Run `fn` after any in-flight send for `key`, serializing sends per epoch. */
+  #withEpochLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.#forkSendChain.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    // Keep a non-throwing tail so the next waiter chains cleanly off this one.
+    this.#forkSendChain.set(
+      key,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
   }
 
   /**
