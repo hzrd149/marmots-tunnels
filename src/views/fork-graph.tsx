@@ -32,15 +32,19 @@ function layout(view: ForkTreeView): {
   const onCanonical = new Set(view.canonicalPath);
 
   const depth = new Map<string, number>();
-  const computeDepth = (tag: string): number => {
+  const computeDepth = (tag: string, seen: Set<string>): number => {
     const cached = depth.get(tag);
     if (cached !== undefined) return cached;
+    // Guard against a cycle in the parent chain (inconsistent fork data):
+    // re-entering a tag already on the stack means we'd recurse forever.
+    if (seen.has(tag)) return 0;
+    seen.add(tag);
     const node = byTag.get(tag);
-    const d = node?.parentTag ? computeDepth(node.parentTag) + 1 : 0;
+    const d = node?.parentTag ? computeDepth(node.parentTag, seen) + 1 : 0;
     depth.set(tag, d);
     return d;
   };
-  for (const n of view.nodes) computeDepth(n.tag);
+  for (const n of view.nodes) computeDepth(n.tag, new Set());
 
   const orderChildren = (children: string[]): string[] =>
     [...children].sort((a, b) => {
@@ -54,21 +58,36 @@ function layout(view: ForkTreeView): {
 
   const lane = new Map<string, number>();
   let nextLane = 0;
+  const visiting = new Set<string>();
   const visit = (tag: string): number => {
-    const node = byTag.get(tag);
-    const kids = node ? orderChildren(node.childTags) : [];
-    if (kids.length === 0) {
+    // Already placed: a node reachable as a child via more than one path
+    // (a DAG, not a strict tree) is laid out once.
+    const cached = lane.get(tag);
+    if (cached !== undefined) return cached;
+    // Cycle in childTags (inconsistent fork data): re-entering a tag still on
+    // the DFS stack would recurse forever — break it onto its own lane.
+    if (visiting.has(tag)) {
       const l = nextLane++;
       lane.set(tag, l);
       return l;
     }
-    let first = 0;
-    kids.forEach((kid, i) => {
-      const l = visit(kid);
-      if (i === 0) first = l;
-    });
-    lane.set(tag, first);
-    return first;
+    visiting.add(tag);
+    const node = byTag.get(tag);
+    const kids = node ? orderChildren(node.childTags) : [];
+    let result: number;
+    if (kids.length === 0) {
+      result = nextLane++;
+    } else {
+      let first = 0;
+      kids.forEach((kid, i) => {
+        const l = visit(kid);
+        if (i === 0) first = l;
+      });
+      result = first;
+    }
+    lane.set(tag, result);
+    visiting.delete(tag);
+    return result;
   };
   if (view.rootTag) visit(view.rootTag);
   // Defensive: place any node not reachable from the root on its own lane.
