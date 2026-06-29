@@ -263,6 +263,16 @@ export async function createServer(
     // chat message exactly once ever; this store makes that survive restarts so a
     // startup archive replay doesn't re-react to the whole history.
     reactedStore: new SqliteKeyValueStore<string>(db, "reactions"),
+    // When (unix seconds) each kind-445 event was first *received* by this
+    // server, keyed `${groupHex}:${eventId}`. Recorded on first sight and never
+    // overwritten — so a restart's archive replay keeps the original receive
+    // time — letting the UI show the gap between an event's `created_at` and when
+    // we actually saw it.
+    receivedStore: new SqliteKeyValueStore<number>(db, "received"),
+    // When (unix seconds) this server joined each group, keyed by group hex.
+    // Recorded at join; lets the UI mark events created before we were added
+    // (which this observer can never decrypt).
+    joinedStore: new SqliteKeyValueStore<number>(db, "joined"),
     groupTtlHours: config.groupTtlHours,
     dispose: () => db.close(),
   });

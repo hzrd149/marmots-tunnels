@@ -90,6 +90,13 @@ const STYLES = `
   table.heads th { color: var(--muted); font-weight: 500; font-size: 11px;
     text-transform: uppercase; letter-spacing: .05em; }
   table.heads .mono { font-size: 12px; }
+  table.heads td.num, table.heads th.num { text-align: right;
+    font-variant-numeric: tabular-nums; }
+  table.pending tr.pre-join td { color: var(--muted); opacity: .65; }
+  table.pending tr.join-divider td { color: var(--danger);
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
+    border-bottom: 1px solid var(--danger); }
   .invite .invite-row { display: flex; gap: 18px; align-items: center; }
   .invite svg { border-radius: 6px; display: block; }
   .invite p { margin: 0 0 8px; color: var(--muted); }

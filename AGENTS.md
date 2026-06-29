@@ -97,7 +97,8 @@ All state is one SQLite DB at `$TUNNELS_DATA/state.db` (WAL mode). Each
 JSON replacer/reviver tag-and-restore `Uint8Array` (base64) and `bigint`, since MLS
 state doesn't round-trip through plain JSON. Tables: `groups`, `rewind`,
 `keypackages`, `invites` (library-owned), and `messages`, `message_epochs`, `events`,
-`reactions` (tunnels-owned sidecars). `PrefixedKeyValueStore` namespaces per-group
+`reactions`, `received` (first-seen event receive times), `joined` (per-group join
+times) (tunnels-owned sidecars). `PrefixedKeyValueStore` namespaces per-group
 data inside a shared table by a `${groupHex}:` prefix. The identity key persists at
 `$TUNNELS_DATA/identity.key` (unless `TUNNELS_SECRET` overrides it), so restarts keep
 the same group memberships.

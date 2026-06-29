@@ -112,6 +112,14 @@ app.get("/:groupId", async (c) => {
   const { messages, meta } = await loadMessages(groupId);
   const view = group.forkTreeView();
   const stats = computeNodeStats(messages, meta);
+  const pending = group.pendingEvents();
+  const [receivedAt, joinedAt] = await Promise.all([
+    server.receivedAtFor(
+      groupId,
+      pending.map((event) => event.id),
+    ),
+    server.joinedAt(groupId),
+  ]);
 
   return c.html(
     <GroupOverview
@@ -121,7 +129,9 @@ app.get("/:groupId", async (c) => {
       view={view}
       countByTag={stats.countByTag}
       forks={summarizeForks(view, stats)}
-      pending={group.pendingEvents()}
+      pending={pending}
+      receivedAt={receivedAt}
+      joinedAt={joinedAt}
       nameFor={(pubkey) => server.nameFor(pubkey)}
     />,
   );

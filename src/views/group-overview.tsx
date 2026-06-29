@@ -8,7 +8,7 @@ import type {
 } from "@internet-privacy/marmot-ts/client";
 
 import type { ForkSummary } from "../helpers/fork-stats.js";
-import { formatTime, hexShort, npubShort } from "../helpers/format.js";
+import { formatDuration, formatTime, hexShort } from "../helpers/format.js";
 import { groupName } from "../marmot/server.js";
 import { Author } from "./author.js";
 import { ForkGraph } from "./fork-graph.js";
@@ -29,6 +29,13 @@ export interface GroupOverviewProps {
    * undecryptable events and point at a bug.
    */
   pending: NostrEvent[];
+  /** First-seen receive time (unix seconds) per pending event id. */
+  receivedAt: Record<string, number>;
+  /**
+   * When (unix seconds) the server joined this group, or `undefined` if unknown.
+   * Pending events created before this predate our membership — unreadable.
+   */
+  joinedAt?: number;
   nameFor: (pubkey: string) => string;
 }
 
@@ -46,9 +53,52 @@ export const GroupOverview: FC<GroupOverviewProps> = ({
   countByTag,
   forks,
   pending,
+  receivedAt,
+  joinedAt,
   nameFor,
 }) => {
   const info = group.info;
+
+  // Pending events newest-first, with a divider marking when the server was
+  // invited: rows below it were created before we joined and can never decrypt.
+  const orderedPending = [...pending].sort(
+    (a, b) => b.created_at - a.created_at,
+  );
+  const joinDivider = (
+    <tr class="join-divider">
+      <td colspan={4}>
+        server invited {joinedAt != null ? formatTime(joinedAt) : "time unknown"}{" "}
+        · everything below is unreadable ↓
+      </td>
+    </tr>
+  );
+  const pendingRows: unknown[] = [];
+  // Suppress the divider entirely when the join time is unknown (nothing to mark).
+  let dividerPlaced = joinedAt == null;
+  for (const event of orderedPending) {
+    // Newest-first: the divider drops in just before the first pre-join event.
+    if (!dividerPlaced && event.created_at < joinedAt!) {
+      pendingRows.push(joinDivider);
+      dividerPlaced = true;
+    }
+    const received = receivedAt[event.id];
+    const preJoin = joinedAt != null && event.created_at < joinedAt;
+    pendingRows.push(
+      <tr class={preJoin ? "pre-join" : undefined}>
+        <td class="mono" title={event.id}>
+          {hexShort(event.id)}
+        </td>
+        <td>{formatTime(event.created_at)}</td>
+        <td>{received != null ? formatTime(received) : "—"}</td>
+        <td class="num">
+          {received != null ? formatDuration(received - event.created_at) : "—"}
+        </td>
+      </tr>,
+    );
+  }
+  // No pre-join event was hit — every event is after the invite, so the join
+  // boundary sits at the very bottom, below them all.
+  if (!dividerPlaced) pendingRows.push(joinDivider);
 
   return (
     <Layout
@@ -177,9 +227,12 @@ export const GroupOverview: FC<GroupOverviewProps> = ({
           Kind-445 group events received from relays (and the durable archive)
           that have <strong>not</strong> yet decrypted/processed into the fork
           tree above — the engine's ingestion pool. They are retried as the tree
-          grows, so this is normally empty. Anything that lingers here is an
-          event this observer could never read: a missing event would otherwise
-          go unnoticed, and a stuck one points at a decode/convergence bug.
+          grows, so this is normally empty. Events created before the server was
+          invited (above the marker) predate our membership and can never be
+          decrypted; anything else that lingers points at a decode/convergence
+          bug. <strong>created</strong> is the sender's timestamp;{" "}
+          <strong>received</strong> is when this server first saw the event, and
+          <strong> Δ</strong> the gap between them.
         </p>
         {pending.length === 0 ? (
           <div class="empty">
@@ -190,23 +243,12 @@ export const GroupOverview: FC<GroupOverviewProps> = ({
             <thead>
               <tr>
                 <th>event id</th>
+                <th>created</th>
                 <th>received</th>
-                <th>ephemeral sender</th>
+                <th class="num">Δ</th>
               </tr>
             </thead>
-            <tbody>
-              {pending.map((event) => (
-                <tr>
-                  <td class="mono" title={event.id}>
-                    {hexShort(event.id)}
-                  </td>
-                  <td>{formatTime(event.created_at)}</td>
-                  <td class="mono" title={event.pubkey}>
-                    {npubShort(event.pubkey)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
+            <tbody>{pendingRows}</tbody>
           </table>
         )}
       </section>

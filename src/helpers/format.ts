@@ -32,3 +32,29 @@ export function colorForPubkey(pubkey: string): string {
 export function formatTime(seconds: number): string {
   return new Date(seconds * 1000).toLocaleString();
 }
+
+/**
+ * Format a signed duration in seconds as a compact `1h 2m`, `3.4s`, `0s`, … A
+ * negative value keeps its sign (e.g. `-2m` when a received event predates its
+ * own `created_at`, i.e. the sender's clock ran ahead).
+ */
+export function formatDuration(seconds: number): string {
+  const sign = seconds < 0 ? "-" : "";
+  const abs = Math.abs(seconds);
+  if (abs < 60) return `${sign}${abs}s`;
+  const parts: string[] = [];
+  const units: [label: string, size: number][] = [
+    ["d", 86400],
+    ["h", 3600],
+    ["m", 60],
+    ["s", 1],
+  ];
+  let rest = abs;
+  for (const [label, size] of units) {
+    const value = Math.floor(rest / size);
+    if (value > 0) parts.push(`${value}${label}`);
+    rest %= size;
+    if (parts.length === 2) break; // two units is plenty of precision
+  }
+  return sign + parts.join(" ");
+}

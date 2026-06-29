@@ -115,6 +115,13 @@ export interface TunnelServerOptions {
    */
   reactedStore: GenericKeyValueStore<string>;
   /**
+   * First-seen receive time (unix seconds) per kind-445 event, keyed
+   * `${groupHex}:${eventId}`. Lets the UI show the created_at→received gap.
+   */
+  receivedStore: GenericKeyValueStore<number>;
+  /** Join time (unix seconds) per group, keyed by group hex. */
+  joinedStore: GenericKeyValueStore<number>;
+  /**
    * Optional inactivity TTL in hours. When set (> 0), groups idle for at least
    * this long are periodically purged from local storage. Unset = retain forever.
    */
@@ -161,6 +168,8 @@ export class TunnelServer {
   readonly #metaStore: GenericKeyValueStore<MessageMeta>;
   readonly #eventArchive: GenericKeyValueStore<NostrEvent>;
   readonly #reactedStore: GenericKeyValueStore<string>;
+  readonly #receivedStore: GenericKeyValueStore<number>;
+  readonly #joinedStore: GenericKeyValueStore<number>;
   readonly #groupTtlHours?: number;
   readonly #dispose?: () => void;
 
@@ -177,6 +186,10 @@ export class TunnelServer {
   readonly #metaCache = new Map<string, MessageMeta>();
   /** Rumor keys (`${groupHex}:${rumorId}`) already reacted to — restart-loaded. */
   readonly #reactedCache = new Set<string>();
+  /** First-seen receive time (unix s) per `${groupHex}:${eventId}` — restart-loaded. */
+  readonly #receivedCache = new Map<string, number>();
+  /** Join time (unix s) per group hex, cached lazily from `#joinedStore`. */
+  readonly #joinedCache = new Map<string, number>();
 
   #stopped = false;
   #inviteConnection?: Unsubscribable;
@@ -197,6 +210,8 @@ export class TunnelServer {
     this.#metaStore = options.metaStore;
     this.#eventArchive = options.eventArchive;
     this.#reactedStore = options.reactedStore;
+    this.#receivedStore = options.receivedStore;
+    this.#joinedStore = options.joinedStore;
     this.#groupTtlHours = options.groupTtlHours;
     this.#dispose = options.dispose;
   }
@@ -444,8 +459,8 @@ export class TunnelServer {
    * *without publishing anything* — so the passive-observer contract holds — and
    * its `destroyed` event drives `#untrack` via the watch loop. We then clear the
    * tunnels-owned sidecars the library doesn't know about: the raw-event archive,
-   * the message-meta index, and the reacted-message dedup index, all keyed
-   * `${groupHex}:`.
+   * the message-meta index, the reacted-message dedup index, and the receive-time
+   * index (all keyed `${groupHex}:`), plus this group's join-time row.
    */
   async #purgeGroup(idStr: string): Promise<void> {
     try {
@@ -458,8 +473,13 @@ export class TunnelServer {
     await this.#clearPrefixed(this.#eventArchive, `${idStr}:`);
     await this.#clearPrefixed(this.#metaStore, `${idStr}:`);
     await this.#clearPrefixed(this.#reactedStore, `${idStr}:`);
-    for (const key of [...this.#metaCache.keys()]) {
-      if (key.startsWith(`${idStr}:`)) this.#metaCache.delete(key);
+    await this.#clearPrefixed(this.#receivedStore, `${idStr}:`);
+    await this.#joinedStore.removeItem(idStr).catch(() => {});
+    this.#joinedCache.delete(idStr);
+    for (const cache of [this.#metaCache, this.#receivedCache]) {
+      for (const key of [...cache.keys()]) {
+        if (key.startsWith(`${idStr}:`)) cache.delete(key);
+      }
     }
     for (const key of [...this.#reactedCache]) {
       if (key.startsWith(`${idStr}:`)) this.#reactedCache.delete(key);
@@ -507,10 +527,17 @@ export class TunnelServer {
       // superset of whatever relays still serve (idempotent upsert by id), and
       // advance the group's last-active time from the newest event seen.
       let newest = this.#lastActive.get(group.idStr) ?? 0;
+      const now = Math.floor(Date.now() / 1000);
       for (const event of fresh) {
-        void this.#eventArchive
-          .setItem(`${group.idStr}:${event.id}`, event)
-          .catch(() => {});
+        const key = `${group.idStr}:${event.id}`;
+        void this.#eventArchive.setItem(key, event).catch(() => {});
+        // Stamp the first time we ever saw this event, and only the first time —
+        // the cache is warmed from the store on connect, so a restart's archive
+        // replay keeps the original receive time instead of resetting it to now.
+        if (!this.#receivedCache.has(key)) {
+          this.#receivedCache.set(key, now);
+          void this.#receivedStore.setItem(key, now).catch(() => {});
+        }
         if (event.created_at > newest) newest = event.created_at;
       }
       this.#lastActive.set(group.idStr, newest);
@@ -555,10 +582,14 @@ export class TunnelServer {
       }
     };
 
-    // Warm the reacted-message dedup cache from the persisted index *before* any
-    // event can be drained, so a restart's archive replay (or an early live
-    // event) re-reacts to nothing we've already reacted to.
-    await this.#loadReactedKeys(group.idStr);
+    // Warm the reacted-message dedup cache and the first-seen receive times from
+    // their persisted indexes *before* any event can be drained, so a restart's
+    // archive replay (or an early live event) neither re-reacts to anything we've
+    // already reacted to nor resets an event's original receive time.
+    await Promise.all([
+      this.#loadReactedKeys(group.idStr),
+      this.#loadReceivedTimes(group.idStr),
+    ]);
 
     // Register the live subscription first (so nothing is missed), then drain in
     // two batches: our durable event archive — so the full history survives even
@@ -602,6 +633,66 @@ export class TunnelServer {
       key.startsWith(prefix),
     );
     for (const key of keys) this.#reactedCache.add(key);
+  }
+
+  /** Load a group's persisted first-seen receive times into the cache. */
+  async #loadReceivedTimes(groupIdStr: string): Promise<void> {
+    const prefix = `${groupIdStr}:`;
+    const keys = (await this.#receivedStore.keys()).filter((key) =>
+      key.startsWith(prefix),
+    );
+    await Promise.all(
+      keys.map(async (key) => {
+        const at = await this.#receivedStore.getItem(key);
+        if (at != null) this.#receivedCache.set(key, at);
+      }),
+    );
+  }
+
+  /**
+   * The first-seen receive time (unix seconds) for each of `eventIds` in one
+   * group, keyed by event id. Reads the in-memory cache first, falling back to
+   * the persisted index for events seen in an earlier run; ids never seen are
+   * simply absent from the result.
+   */
+  async receivedAtFor(
+    groupIdStr: string,
+    eventIds: string[],
+  ): Promise<Record<string, number>> {
+    const out: Record<string, number> = {};
+    await Promise.all(
+      eventIds.map(async (id) => {
+        const key = `${groupIdStr}:${id}`;
+        let at = this.#receivedCache.get(key);
+        if (at == null) {
+          const stored = await this.#receivedStore.getItem(key);
+          if (stored != null) at = stored;
+        }
+        if (at != null) {
+          this.#receivedCache.set(key, at);
+          out[id] = at;
+        }
+      }),
+    );
+    return out;
+  }
+
+  /**
+   * When (unix seconds) this server joined a group, or `undefined` if unknown
+   * (e.g. a group joined before join-time tracking existed). Events created
+   * before this are from before we were added, so this observer can never
+   * decrypt them.
+   */
+  async joinedAt(groupIdStr: string): Promise<number | undefined> {
+    let at = this.#joinedCache.get(groupIdStr);
+    if (at == null) {
+      const stored = await this.#joinedStore.getItem(groupIdStr);
+      if (stored != null) {
+        at = stored;
+        this.#joinedCache.set(groupIdStr, at);
+      }
+    }
+    return at;
   }
 
   /**
@@ -821,6 +912,14 @@ export class TunnelServer {
         welcomeRumor: invite as any,
       });
       await this.#client.invites.markAsRead(invite.id);
+      // Record when we joined so the UI can flag events created before we were
+      // added — those predate our membership and can never decrypt. Only stamp
+      // the first join; a re-yield of the same group keeps the original time.
+      if (!(await this.joinedAt(group.idStr))) {
+        const at = Math.floor(Date.now() / 1000);
+        this.#joinedCache.set(group.idStr, at);
+        void this.#joinedStore.setItem(group.idStr, at).catch(() => {});
+      }
       this.#track(group);
       log("joined group %s (%s)", group.idStr.slice(0, 8), groupName(group));
     } catch (err) {
