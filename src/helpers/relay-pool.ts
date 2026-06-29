@@ -15,6 +15,18 @@ function resolveRelays(relays: string[], fallback: string[]): string[] {
 }
 
 /**
+ * Options applied to every live subscription so a connection is never dropped:
+ * `reconnect: Infinity` retries connection errors forever (default is 3), and
+ * `resubscribe: Infinity` re-opens the REQ forever after a clean relay CLOSED
+ * (default is off). Without these a transient disconnect or a relay-side CLOSE
+ * would silently end the subscription and we'd miss every later kind-445 / invite.
+ */
+const PERSISTENT_SUB_OPTIONS = {
+  reconnect: Infinity,
+  resubscribe: Infinity,
+} as const;
+
+/**
  * Thin adapter over `applesauce-relay`'s {@link AsRelayPool} that implements
  * marmot-ts's {@link NostrNetworkInterface}. The pool is shared with the
  * {@link Directory} so relay-list/profile discovery reuses the same
@@ -82,7 +94,7 @@ export class RelayPool implements NostrNetworkInterface {
       };
     }
     const targets = resolveRelays(relays, this.defaultRelays);
-    return this.#pool.subscription(targets, filters);
+    return this.#pool.subscription(targets, filters, PERSISTENT_SUB_OPTIONS);
   }
 
   async getUserInboxRelays(pubkey: string): Promise<string[]> {
