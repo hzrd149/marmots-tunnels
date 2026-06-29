@@ -8,6 +8,8 @@ packages:
 # to skip it — the platform binary package (@esbuild/linux-x64) provides it.
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - prettier@3.9.3
 onlyBuiltDependencies:
   - esbuild
 strictDepBuilds: false
