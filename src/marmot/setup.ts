@@ -258,6 +258,11 @@ export async function createServer(
     // is reconstructed from our own store, independent of whether relays still
     // serve those events.
     eventArchive: new SqliteKeyValueStore<NostrEvent>(db, "events"),
+    // Dedup index of chat messages we've already reacted to, keyed
+    // `${groupHex}:${rumorId}` with the emoji we sent. The server reacts to every
+    // chat message exactly once ever; this store makes that survive restarts so a
+    // startup archive replay doesn't re-react to the whole history.
+    reactedStore: new SqliteKeyValueStore<string>(db, "reactions"),
     groupTtlHours: config.groupTtlHours,
     dispose: () => db.close(),
   });

@@ -1,6 +1,7 @@
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import { npubEncode } from "applesauce-core/helpers/pointers";
 import type { EventStore } from "applesauce-core/event-store";
+import type { Rumor } from "applesauce-common/helpers/gift-wrap";
 
 import type {
   ForkTreeNodeView,
@@ -10,6 +11,7 @@ import type {
   Unsubscribable,
 } from "@internet-privacy/marmot-ts/client";
 import {
+  createApplicationMessageIntent,
   createInboxRelayListEvent,
   createNip65RelayListEvent,
   deserializeApplicationData,
@@ -34,6 +36,12 @@ import createDebug from "debug";
 
 import type { Directory } from "../helpers/discovery.js";
 import type { RelayPool } from "../helpers/relay-pool.js";
+import {
+  branchTagFor,
+  buildReactionRumor,
+  CHAT_MESSAGE_KIND,
+  emojiForTag,
+} from "../helpers/reaction.js";
 
 const log = createDebug("tunnels:server");
 
@@ -102,6 +110,11 @@ export interface TunnelServerOptions {
   /** Durable archive of raw kind-445 events, keyed `${groupHex}:${eventId}`. */
   eventArchive: GenericKeyValueStore<NostrEvent>;
   /**
+   * Dedup index of chat messages already reacted to (value = the emoji sent),
+   * keyed `${groupHex}:${rumorId}`. Makes "react once ever" survive restarts.
+   */
+  reactedStore: GenericKeyValueStore<string>;
+  /**
    * Optional inactivity TTL in hours. When set (> 0), groups idle for at least
    * this long are periodically purged from local storage. Unset = retain forever.
    */
@@ -114,11 +127,22 @@ export interface TunnelServerOptions {
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
- * Headless driver for a passive, omniscient group observer. Unlike a chat
- * client it never sends, commits, or rotates leaves — it only listens. Its job
- * is to be invited into groups, follow every kind-445 event, and let the
- * {@link MarmotClient} (configured for infinite retention) record the full fork
- * history so the web UI can render it.
+ * Headless driver for an omniscient group observer. Unlike a chat client it
+ * never commits or rotates leaves — it never changes group state — so it never
+ * disturbs the fork tree it watches. Its job is to be invited into groups,
+ * follow every kind-445 event, and let the {@link MarmotClient} (configured for
+ * infinite retention) record the full fork history so the web UI can render it.
+ *
+ * It is *not* fully silent: it reacts to every chat message it decrypts with a
+ * kind-7 emoji whose glyph is a deterministic function of the *branch* the
+ * message's fork node belongs to ({@link branchTagFor} → {@link emojiForTag}).
+ * The emoji is constant along a lineage — a plain commit advancing the epoch
+ * keeps it — and changes only when a real fork splits off a new branch. A
+ * reaction is a pure MLS application message — it never commits or advances the
+ * epoch — so the fork-tree contract still holds. The reaction both confirms the
+ * debugger received the message and makes a client-side fork *visible*: once a
+ * client diverges, the server sees its later messages on a new branch, so their
+ * emoji changes while the pre-fork messages keep the old one.
  *
  * The lifecycle: publish a discoverable identity + KeyPackage so peers can
  * invite us, restore + connect every known group, auto-accept every joinable
@@ -136,6 +160,7 @@ export class TunnelServer {
   readonly #relays: string[];
   readonly #metaStore: GenericKeyValueStore<MessageMeta>;
   readonly #eventArchive: GenericKeyValueStore<NostrEvent>;
+  readonly #reactedStore: GenericKeyValueStore<string>;
   readonly #groupTtlHours?: number;
   readonly #dispose?: () => void;
 
@@ -150,6 +175,8 @@ export class TunnelServer {
   readonly #names = new Map<string, string>();
   /** In-memory mirror of the message-meta index, keyed `${groupHex}:${rumorId}`. */
   readonly #metaCache = new Map<string, MessageMeta>();
+  /** Rumor keys (`${groupHex}:${rumorId}`) already reacted to — restart-loaded. */
+  readonly #reactedCache = new Set<string>();
 
   #stopped = false;
   #inviteConnection?: Unsubscribable;
@@ -169,6 +196,7 @@ export class TunnelServer {
     ];
     this.#metaStore = options.metaStore;
     this.#eventArchive = options.eventArchive;
+    this.#reactedStore = options.reactedStore;
     this.#groupTtlHours = options.groupTtlHours;
     this.#dispose = options.dispose;
   }
@@ -415,8 +443,9 @@ export class TunnelServer {
    * purges the library-owned state (group state, rewind history, rumor history)
    * *without publishing anything* — so the passive-observer contract holds — and
    * its `destroyed` event drives `#untrack` via the watch loop. We then clear the
-   * tunnels-owned sidecars the library doesn't know about: the raw-event archive
-   * and the message-meta index, both keyed `${groupHex}:`.
+   * tunnels-owned sidecars the library doesn't know about: the raw-event archive,
+   * the message-meta index, and the reacted-message dedup index, all keyed
+   * `${groupHex}:`.
    */
   async #purgeGroup(idStr: string): Promise<void> {
     try {
@@ -428,8 +457,12 @@ export class TunnelServer {
     this.#untrack(idStr);
     await this.#clearPrefixed(this.#eventArchive, `${idStr}:`);
     await this.#clearPrefixed(this.#metaStore, `${idStr}:`);
+    await this.#clearPrefixed(this.#reactedStore, `${idStr}:`);
     for (const key of [...this.#metaCache.keys()]) {
       if (key.startsWith(`${idStr}:`)) this.#metaCache.delete(key);
+    }
+    for (const key of [...this.#reactedCache]) {
+      if (key.startsWith(`${idStr}:`)) this.#reactedCache.delete(key);
     }
   }
 
@@ -488,12 +521,14 @@ export class TunnelServer {
             result.result.kind === "applicationMessage"
           ) {
             const state = result.result.newState;
+            // An application message never changes group state, so newState's
+            // confirmation tag is the fork-tree node it decrypted at.
+            const tag = Buffer.from(state.confirmationTag).toString("hex");
             this.#recordMessageMeta(group.idStr, result.result.message, {
               epoch: Number(state.groupContext.epoch),
-              // An application message never changes group state, so newState's
-              // confirmation tag is the fork-tree node it decrypted at.
-              tag: Buffer.from(state.confirmationTag).toString("hex"),
+              tag,
             });
+            void this.#maybeReact(group, result.result.message, tag);
           } else if (
             result.kind === "invalidated" &&
             result.payload !== undefined &&
@@ -509,6 +544,7 @@ export class TunnelServer {
                 epoch: result.epoch,
                 tag: result.tag,
               });
+              void this.#maybeReact(group, rumor, result.tag);
             } catch {
               // not a NIP-59 rumor payload (or history unavailable) — skip
             }
@@ -518,6 +554,11 @@ export class TunnelServer {
         log("connect: ingest failed for %s: %O", group.idStr, err);
       }
     };
+
+    // Warm the reacted-message dedup cache from the persisted index *before* any
+    // event can be drained, so a restart's archive replay (or an early live
+    // event) re-reacts to nothing we've already reacted to.
+    await this.#loadReactedKeys(group.idStr);
 
     // Register the live subscription first (so nothing is missed), then drain in
     // two batches: our durable event archive — so the full history survives even
@@ -552,6 +593,78 @@ export class TunnelServer {
     return events
       .filter((event): event is NostrEvent => event != null)
       .sort((a, b) => b.created_at - a.created_at);
+  }
+
+  /** Load a group's already-reacted rumor keys into the in-memory dedup cache. */
+  async #loadReactedKeys(groupIdStr: string): Promise<void> {
+    const prefix = `${groupIdStr}:`;
+    const keys = (await this.#reactedStore.keys()).filter((key) =>
+      key.startsWith(prefix),
+    );
+    for (const key of keys) this.#reactedCache.add(key);
+  }
+
+  /**
+   * React to a freshly-decrypted chat message with a branch-derived emoji,
+   * exactly once ever. The emoji is a deterministic function of the *branch* the
+   * message's fork node belongs to ({@link branchTagFor}) — not its epoch — so
+   * the emoji is constant along a lineage and changes only when a real fork
+   * splits off a new branch. Any client able to read the reaction therefore sees
+   * a consistent per-branch marker, and a client-side fork surfaces as its later
+   * messages picking up a new emoji.
+   *
+   * Only kind-9 chat rumors are reacted to (never our own reactions, never
+   * non-chat rumors — which also avoids any react-to-our-own-reaction loop). The
+   * dedup key is claimed synchronously so concurrent drains don't double-react,
+   * and persisted on success so a restart's archive replay stays quiet. Sending
+   * is a pure MLS application message: it never commits or advances the epoch, so
+   * the fork-tree the debugger watches is undisturbed.
+   */
+  async #maybeReact(
+    group: MarmotGroup,
+    source: Uint8Array | Rumor,
+    tag: string,
+  ): Promise<void> {
+    let target: Rumor;
+    try {
+      target =
+        source instanceof Uint8Array
+          ? deserializeApplicationData(source)
+          : source;
+    } catch {
+      return; // not a NIP-59 rumor payload
+    }
+    if (target.kind !== CHAT_MESSAGE_KIND) return; // only chat messages
+    if (target.pubkey === this.#pubkey) return; // never react to ourselves
+
+    const key = `${group.idStr}:${target.id}`;
+    if (this.#reactedCache.has(key)) return;
+    this.#reactedCache.add(key); // claim before the await so we react once
+
+    // Resolve the branch (stable along a lineage) the message's epoch sits on,
+    // then pick that branch's emoji — so per-epoch commits keep one emoji and a
+    // new fork is what introduces a new one.
+    const branch = branchTagFor(group.forkTreeView(), tag);
+    const emoji = emojiForTag(branch);
+    try {
+      const reaction = buildReactionRumor({
+        pubkey: this.#pubkey,
+        target,
+        emoji,
+      });
+      await group.submitIntent(createApplicationMessageIntent(reaction));
+      await this.#reactedStore.setItem(key, emoji).catch(() => {});
+      log(
+        "reacted %s to %s on %s (branch %s)",
+        emoji,
+        target.id.slice(0, 8),
+        group.idStr.slice(0, 8),
+        branch ? branch.slice(0, 8) : "—",
+      );
+    } catch (err) {
+      this.#reactedCache.delete(key); // let a later sighting retry
+      log("react failed for %s: %O", target.id.slice(0, 8), err);
+    }
   }
 
   /**
